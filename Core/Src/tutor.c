@@ -25,11 +25,11 @@ uint16_t led_s_mapping[8] = { 0x0040, 0x0010, 0x0004, 0x0002, 0x4000, 0x1000, 0x
 
 // Tutor mode string
 char *tutor_mode_string[TUTOR_SIZE] =
-        { "Free Play", "Translate", "Translate (Hint)", "Logic Gates", "Counter" };
+        { "Free Play", "Translate", "Translate (Hint)", "Logic Gates", "Counter", "Stats" };
 char *tutor_logic_string[TUTOR_LOGIC_SIZE] = { "AND", "OR", "XOR", "NOR" };
 
 // Use tutor stats table
-uint8_t use_tutor_stats[TUTOR_SIZE] = { 1, 1, 1, 1, 0 };
+uint8_t use_tutor_stats[TUTOR_SIZE] = { 1, 1, 1, 1, 0, 0 };
 
 // 16 bit value to mapping value
 uint16_t convert_mapping(uint16_t value, uint16_t *mapping) {
@@ -185,10 +185,12 @@ void tutor_start(tutor_t *tutor) {
 
 void tutor_task(tutor_t *tutor, tutor_action_t action) {
     char str_buffer[22];
+    char num_buffer[22];
     char bit_buffer[10];
     char bit_buffer2[10];
     char serial_buffer[120];
     uint32_t time = 0;
+    uint32_t total_time = 0;
     uint8_t len = 0;
 
     if (action == TUTOR_ACTION_MODE || action == TUTOR_ACTION_INIT) {
@@ -255,13 +257,14 @@ void tutor_task(tutor_t *tutor, tutor_action_t action) {
                 // Do nothing
             }
         } else if (tutor->state == TUTOR_STATE_END) {
-            tutor->stats[TUTOR_FREE_PLAY_MODE].end_time = TIM5->CNT;
-            tutor->stats[TUTOR_FREE_PLAY_MODE].end_score = tutor->score;
+            tutor->stats[tutor->mode].end_time = TIM5->CNT;
+            tutor->stats[tutor->mode].end_score = tutor->score;
             sprintf(serial_buffer, "Total button presses: %d\r\n", tutor->stats[TUTOR_FREE_PLAY_MODE].total);
             print_terminal(serial_buffer);
             time = time_diff(tutor->stats[TUTOR_FREE_PLAY_MODE].start_time,
                     tutor->stats[TUTOR_FREE_PLAY_MODE].end_time);
             time_to_string(str_buffer, time, 10000);
+            tutor->stats[tutor->mode].accumulated_time += time;
             sprintf(serial_buffer, "Time spent in free mode: %s\r\n", str_buffer);
             print_terminal(serial_buffer);
             tutor->mode++;
@@ -388,6 +391,7 @@ void tutor_task(tutor_t *tutor, tutor_action_t action) {
             time_to_string(str_buffer, time, 10000);
             sprintf(serial_buffer, "Time spent in %s: %s\r\n", tutor_mode_string[tutor->mode], str_buffer);
             print_terminal(serial_buffer);
+            tutor->stats[tutor->mode].accumulated_time += time;
             sprintf(serial_buffer, "Total Round Score: %ld Cumulative Score: %ld\r\n",
                     tutor->stats[tutor->mode].end_score - tutor->stats[tutor->mode].start_score,
                     tutor->score);
@@ -516,6 +520,7 @@ void tutor_task(tutor_t *tutor, tutor_action_t action) {
             time_to_string(str_buffer, time, 10000);
             sprintf(serial_buffer, "Time spent in %s: %s\r\n", tutor_mode_string[tutor->mode], str_buffer);
             print_terminal(serial_buffer);
+            tutor->stats[tutor->mode].accumulated_time += time;
             sprintf(serial_buffer, "Total Round Score: %ld Cumulative Score: %ld\r\n",
                     tutor->stats[tutor->mode].end_score - tutor->stats[tutor->mode].start_score,
                     tutor->score);
@@ -572,10 +577,59 @@ void tutor_task(tutor_t *tutor, tutor_action_t action) {
             time_to_string(str_buffer, time, 10000);
             sprintf(serial_buffer, "Time spent in %s: %s\r\n", tutor_mode_string[tutor->mode], str_buffer);
             print_terminal(serial_buffer);
+            tutor->mode++;
+            tutor->state = TUTOR_STATE_START;
+        }
+        break;
+    case TUTOR_STATS_MODE:
+        // Stats mode doesn't have any interactive elements, so we can just display stats and wait for mode change
+        if (tutor->state == TUTOR_STATE_START) {
+            tutor_start(tutor);
+            ssd1306_FillRectangle(0, 24, 128, 50, Black);
+            sprintf(str_buffer, "Tutor Stats");
+            ssd1306_WriteStringCentered(str_buffer, Font_16x26, White, 26);
+            ssd1306_UpdateScreen();
+            print_divider(80);
+            print_terminal("Stats Mode\r\n");
+            total_time = 0;
+            for (int i = 0; i < TUTOR_SIZE - 1; i++) { // Exclude stats mode itself
+                if (use_tutor_stats[i]) {
+                    time = time_diff(tutor->stats[i].start_time, tutor->stats[i].end_time);
+                    time_to_string(str_buffer, time, 10000);
+                    total_time += tutor->stats[i].accumulated_time;
+                    sprintf(serial_buffer, "%s - Time: %s Score: %ld Correct: %d Incorrect: %d Total: %d\r\n",
+                            tutor_mode_string[i], str_buffer,
+                            tutor->stats[i].end_score - tutor->stats[i].start_score, tutor->stats[i].correct,
+                            tutor->stats[i].incorrect, tutor->stats[i].total);
+                    print_terminal(serial_buffer);
+                }
+            }
+
+            time_to_string(str_buffer, total_time, 10000);
+            sprintf(serial_buffer, "Time Spent: %s", str_buffer);
+            print_terminal(serial_buffer);
+            len = strlen(serial_buffer);
+//            ssd1306_SetCursor(128 - (len * Font_11x18.FontWidth), 13); // Right align
+            ssd1306_SetCursor(0, 16); // Left align
+            ssd1306_WriteString(serial_buffer, Font_6x8, White);
+
+            // Print stats on the screen as well
+            for (int i = 1; i < TUTOR_SIZE - 1; i++) {
+                if (use_tutor_stats[i]) {
+                    float percentage = (float) tutor->stats[i].correct / (tutor->stats[i].correct + tutor->stats[i].incorrect) * 100;
+                    float_to_string(num_buffer, percentage);
+                    sprintf(serial_buffer, "%s: %ld (%s%%)", tutor_mode_string[i], tutor->stats[i].end_score - tutor->stats[i].start_score, num_buffer);
+                    len = strlen(serial_buffer);
+                    ssd1306_SetCursor(0, 24 + ((i - 1) * 10));
+                    ssd1306_WriteString(serial_buffer, Font_6x8, White);
+                }
+            }
+            ssd1306_UpdateScreen();
+            tutor->state = TUTOR_STATE_PLAY;
+        } else if (tutor->state == TUTOR_STATE_END) {
             tutor->mode = 0;
             tutor->state = TUTOR_STATE_START;
         }
-
         break;
     default:
         break;
@@ -583,7 +637,7 @@ void tutor_task(tutor_t *tutor, tutor_action_t action) {
     if (tutor->state == TUTOR_STATE_PLAY) {
         uint8_t update_screen = 0;
         if (TIM5->CNT - tutor->refresh_time > 10000 && tutor->mode != TUTOR_FREE_PLAY_MODE
-                && tutor->mode != TUTOR_COUNTER_MODE) {
+                && tutor->mode != TUTOR_COUNTER_MODE && tutor->mode != TUTOR_STATS_MODE) {
             tutor->refresh_time = TIM5->CNT;
             time = time_diff(tutor->start_time, TIM5->CNT);
             time_to_string(str_buffer, time, 10000);

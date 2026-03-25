@@ -18,6 +18,7 @@ typedef enum {
     TUTOR_CONVERT_HINT_MODE,
     TUTOR_LOGIC_MODE,
     TUTOR_COUNTER_MODE,
+    TUTOR_STATS_MODE,
     TUTOR_SIZE
 } tutor_mode_t;
 
@@ -42,6 +43,7 @@ typedef enum {
 typedef struct {
     uint32_t start_time;
     uint32_t end_time;
+    uint32_t accumulated_time;
     uint16_t correct;
     uint16_t incorrect;
     uint16_t total;
