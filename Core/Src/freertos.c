@@ -34,6 +34,7 @@
 #include "ssd1306.h"
 #include "ui.h"
 #include "tutor.h"
+#include "rng.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -178,6 +179,7 @@ void StartDefaultTask(void *argument) {
             prev_btn_value = btn_value;
         }
         if (button_interrupt_flag) {
+            rng_next(); // Advance RNG to add entropy from timing of button presses
             button_interrupt_flag = 0;
             if (button_next_flag) {
                 button_next_flag = 0;

@@ -77,8 +77,8 @@ void Error_Handler(void);
 #define I2C_INT_EXTI_IRQn EXTI9_5_IRQn
 
 /* USER CODE BEGIN Private defines */
-#define VERSION_MAJOR 0
-#define VERSION_MINOR 1
+#define VERSION_MAJOR 1
+#define VERSION_MINOR 2
 #define VERSION_PATCH 0
 #define BOARD_REVISION "A"
 

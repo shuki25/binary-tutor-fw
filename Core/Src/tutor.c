@@ -15,6 +15,9 @@
 #include "ssd1306.h"
 #include "main.h"
 #include "cmsis_os.h"
+#include "rng.h"
+#include "tiny_blake2s.h"
+#include "base64.h"
 
 // Button Mapping for IO Expander
 uint16_t btn_mapping[8] = { 0x0080, 0x0040, 0x0020, 0x0010, 0x0008, 0x0004, 0x0002, 0x0001 };
@@ -24,12 +27,21 @@ uint16_t led_c_mapping[8] = { 0x0080, 0x0020, 0x0008, 0x0001, 0x8000, 0x2000, 0x
 uint16_t led_s_mapping[8] = { 0x0040, 0x0010, 0x0004, 0x0002, 0x4000, 0x1000, 0x0400, 0x0100 };
 
 // Tutor mode string
-char *tutor_mode_string[TUTOR_SIZE] =
-        { "Free Play", "Translate", "Translate (Hint)", "Logic Gates", "Counter", "Stats" };
+char *tutor_mode_string[TUTOR_SIZE] = { "Free Play", "Translate", "Translate (Hint)", "Logic Gates",
+        "Counter", "Summary" };
+char *tutor_mode_short[TUTOR_SIZE] = { "Free", "Trans", "Hint", "Logic", "Count", "Summary" };
 char *tutor_logic_string[TUTOR_LOGIC_SIZE] = { "AND", "OR", "XOR", "NOR" };
 
 // Use tutor stats table
 uint8_t use_tutor_stats[TUTOR_SIZE] = { 1, 1, 1, 1, 0, 0 };
+
+// Hash data for score validation
+uint8_t secret_key[8] = SECRET_KEY;
+hash_data_t tutor_score_hash_data = { 0 };
+uint8_t hash_buffer[32]; // for score validation using blake2s
+uint8_t base64_buffer[64]; // for score validation using blake2s
+tiny_blake2s_ctx_t blake2s_ctx;
+tutor_summary_t tutor_summary = { 0 };
 
 // 16 bit value to mapping value
 uint16_t convert_mapping(uint16_t value, uint16_t *mapping) {
@@ -142,6 +154,12 @@ void setup_logic_prompt(tutor_t *tutor) {
     }
 }
 
+void tutor_score_validation(const void *in, size_t inlen, uint8_t out[16]) {
+    tiny_blake2s_init(&blake2s_ctx, 16);
+    tiny_blake2s_update(&blake2s_ctx, in, inlen);
+    tiny_blake2s_final(&blake2s_ctx, out, 16);
+}
+
 void tutor_init(tutor_t *tutor, tca9555_t *io_expander_led) {
     tutor->mode = TUTOR_FREE_PLAY_MODE;
     tutor->state = TUTOR_STATE_START;
@@ -158,6 +176,12 @@ void tutor_init(tutor_t *tutor, tca9555_t *io_expander_led) {
     tutor->time_limit = 0;
     tutor->led_value = 0;
     tutor->btn_value = 0;
+
+    memset(&tutor_summary, 0, sizeof(tutor_summary_t));
+    memcpy(&tutor_summary.data.secret_key, secret_key, sizeof(secret_key));
+    assert(sizeof(tutor_summary.data) == 28); // Ensure data struct is 28 bytes for hashing
+    tiny_blake2s_init(&blake2s_ctx, 16);
+
     set_select_led(tutor->io_expander_led, 0);
 }
 
@@ -582,13 +606,11 @@ void tutor_task(tutor_t *tutor, tutor_action_t action) {
         }
         break;
     case TUTOR_STATS_MODE:
-        // Stats mode doesn't have any interactive elements, so we can just display stats and wait for mode change
         if (tutor->state == TUTOR_STATE_START) {
             tutor_start(tutor);
+            set_select_led(tutor->io_expander_led, 0);
+            set_check_led(tutor->io_expander_led, 0);
             ssd1306_FillRectangle(0, 24, 128, 50, Black);
-            sprintf(str_buffer, "Tutor Stats");
-            ssd1306_WriteStringCentered(str_buffer, Font_16x26, White, 26);
-            ssd1306_UpdateScreen();
             print_divider(80);
             print_terminal("Stats Mode\r\n");
             total_time = 0;
@@ -608,24 +630,106 @@ void tutor_task(tutor_t *tutor, tutor_action_t action) {
             time_to_string(str_buffer, total_time, 10000);
             sprintf(serial_buffer, "Time Spent: %s", str_buffer);
             print_terminal(serial_buffer);
-            len = strlen(serial_buffer);
-//            ssd1306_SetCursor(128 - (len * Font_11x18.FontWidth), 13); // Right align
-            ssd1306_SetCursor(0, 16); // Left align
-            ssd1306_WriteString(serial_buffer, Font_6x8, White);
 
             // Print stats on the screen as well
             for (int i = 1; i < TUTOR_SIZE - 1; i++) {
                 if (use_tutor_stats[i]) {
-                    float percentage = (float) tutor->stats[i].correct / (tutor->stats[i].correct + tutor->stats[i].incorrect) * 100;
+                    tutor->stats[i].accumulated_score += tutor->stats[i].end_score
+                            - tutor->stats[i].start_score;
+                    float percentage = (float) tutor->stats[i].correct
+                            / (tutor->stats[i].correct + tutor->stats[i].incorrect) * 100;
                     float_to_string(num_buffer, percentage);
-                    sprintf(serial_buffer, "%s: %ld (%s%%)", tutor_mode_string[i], tutor->stats[i].end_score - tutor->stats[i].start_score, num_buffer);
+                    snprintf(serial_buffer, sizeof(serial_buffer), "%s: %ld (%s%%)", tutor_mode_short[i],
+                            tutor->stats[i].accumulated_score, num_buffer);
                     len = strlen(serial_buffer);
                     ssd1306_SetCursor(0, 24 + ((i - 1) * 10));
                     ssd1306_WriteString(serial_buffer, Font_6x8, White);
                 }
             }
-            ssd1306_UpdateScreen();
+            ssd1306_SetCursor(0, 54);
+            snprintf(serial_buffer, sizeof(serial_buffer), "Score: %ld", tutor->score);
+            ssd1306_WriteString(serial_buffer, Font_6x8, White);
+
+            // Output salt for validation
+            if (tutor_summary.data.salt == 0) {
+                tutor_summary.data.salt = rng_next() & 0xFF;
+            }
+
+            // Generate validation key using blake2s hash of the hash_data and salt
+            tutor_summary.page = 0;
+            tutor_summary.page_updated = 1;
+            tutor_summary.total_time = total_time;
+            tutor_summary.data.total_score = tutor->score;
+            tutor_summary.data.translate_score = tutor->stats[TUTOR_CONVERT_MODE].accumulated_score;
+            tutor_summary.data.translate_hint_score = tutor->stats[TUTOR_CONVERT_HINT_MODE].accumulated_score;
+            tutor_summary.data.logic_score = tutor->stats[TUTOR_LOGIC_MODE].accumulated_score;
+            tutor_score_validation((void*) &tutor_summary.data, sizeof(hash_data_t), hash_buffer);
+            base64_encode(base64_buffer, 64, hash_buffer, sizeof(hash_buffer));
             tutor->state = TUTOR_STATE_PLAY;
+        } else if (tutor->state == TUTOR_STATE_PLAY) {
+            if (action == TUTOR_ACTION_BTN_PRESSED) {
+                // Do nothing
+            } else if (action == TUTOR_ACTION_CHECK) {
+                // Do nothing
+            } else if (action == TUTOR_ACTION_NEXT) {
+                tutor_summary.page = !tutor_summary.page;
+                tutor_summary.page_updated = 1;
+            }
+            if (tutor_summary.page_updated) {
+                ssd1306_Fill(Black);
+                ssd1306_SetCursor(0, 0);
+                sprintf(str_buffer, tutor_mode_string[TUTOR_STATS_MODE]);
+                ssd1306_WriteString(str_buffer, Font_6x8, White);
+                ssd1306_Line(0, 9, 128, 9, White);
+                if (tutor_summary.page) {
+                    snprintf(serial_buffer, sizeof(serial_buffer), "ID: %02X", tutor_summary.data.salt);
+                    len = strlen(serial_buffer);
+                    ssd1306_SetCursor(128 - (len * Font_6x8.FontWidth), 50); // Right align
+                    ssd1306_WriteString(serial_buffer, Font_6x8, White);
+
+                    snprintf(serial_buffer, sizeof(serial_buffer), "< Prev");
+                    len = strlen(serial_buffer);
+                    ssd1306_SetCursor(128 - (len * Font_6x8.FontWidth), 00); // Right align
+                    ssd1306_WriteString(serial_buffer, Font_6x8, White);
+                    sprintf(str_buffer, "Validation Key:");
+                    ssd1306_SetCursor(0, 14);
+                    ssd1306_WriteString(str_buffer, Font_6x8, White);
+                    ssd1306_SetCursor(0, 30);
+                    base64_buffer[17] = '\0'; // Null terminate to fit on one line]
+                    ssd1306_WriteString((char*) base64_buffer, Font_6x8, White);
+                    ssd1306_UpdateScreen();
+                } else {
+                    snprintf(serial_buffer, sizeof(serial_buffer), "Next >");
+                    len = strlen(serial_buffer);
+                    ssd1306_SetCursor(128 - (len * Font_6x8.FontWidth), 00); // Right align
+                    ssd1306_WriteString(serial_buffer, Font_6x8, White);
+                    time_to_string(str_buffer, tutor_summary.total_time, 10000);
+                    sprintf(serial_buffer, "Time Spent: %s", str_buffer);
+                    print_terminal(serial_buffer);
+                    len = strlen(serial_buffer);
+                    ssd1306_SetCursor(0, 14); // Left align
+                    ssd1306_WriteString(serial_buffer, Font_6x8, White);
+
+                    for (int i = 1; i < TUTOR_SIZE - 1; i++) {
+                        if (use_tutor_stats[i]) {
+                            float percentage = (float) tutor->stats[i].correct
+                                    / (tutor->stats[i].correct + tutor->stats[i].incorrect) * 100;
+                            float_to_string(num_buffer, percentage);
+                            snprintf(serial_buffer, sizeof(serial_buffer), "%s: %ld (%s%%)",
+                                    tutor_mode_short[i], tutor->stats[i].accumulated_score, num_buffer);
+                            len = strlen(serial_buffer);
+                            ssd1306_SetCursor(0, 24 + ((i - 1)) * 10);
+                            ssd1306_WriteString(serial_buffer, Font_6x8, White);
+                        }
+                    }
+                    ssd1306_SetCursor(0, 54);
+                    snprintf(serial_buffer, sizeof(serial_buffer), "Total: %ld", tutor->score);
+                    ssd1306_WriteString(serial_buffer, Font_6x8, White);
+                    ssd1306_UpdateScreen();
+                }
+                tutor_summary.page_updated = 0;
+            }
+            // Do nothing
         } else if (tutor->state == TUTOR_STATE_END) {
             tutor->mode = 0;
             tutor->state = TUTOR_STATE_START;
@@ -666,7 +770,7 @@ void tutor_task(tutor_t *tutor, tutor_action_t action) {
             update_screen = 1;
         }
         if (tutor->prev_score != tutor->score && tutor->mode != TUTOR_FREE_PLAY_MODE
-                && tutor->mode != TUTOR_COUNTER_MODE) {
+                && tutor->mode != TUTOR_COUNTER_MODE && tutor->mode != TUTOR_STATS_MODE) {
             tutor->prev_score = tutor->score;
             sprintf(str_buffer, "Score:%06ld", tutor->score);
             ssd1306_SetCursor(0, 54);

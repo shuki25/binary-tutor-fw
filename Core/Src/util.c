@@ -18,14 +18,26 @@ extern CRC_HandleTypeDef hcrc;
  * Parameters    : pointer to the string, float to convert
  * Returns       : None
  * -------------------------------------------------------------------------*/
-void float_to_string(char *str, float f) {
+void float_to_string_precision(char *str, uint32_t len, float f, uint8_t precision) {
+    char precision_str[25];
+    if (precision > 9) {
+        precision = 9; // Limit precision to 16 decimal places
+    }
     int whole = (int) f;
-    int decimal = (int) ((f - (float) whole) * 1000);
+    int base10 = 10;
+    for (int i = 0; i < precision - 1; i++) {
+        base10 *= 10;
+    }
+    int decimal = (int) ((f - (float) whole) * base10);
     if (f < 0) {
         decimal = -decimal;
     }
-    sprintf(str, "%d.%02d", whole, decimal);
-
+    if (precision == 0) {
+        snprintf(str, len, "%d", whole);
+        return;
+    }
+    snprintf(precision_str, 10, "%%d.%%0%dd", precision);
+    snprintf(str, len, precision_str, whole, decimal);
 }
 
 uint32_t time_diff(uint32_t start, uint32_t end) {

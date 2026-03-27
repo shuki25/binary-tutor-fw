@@ -12,6 +12,9 @@
 #include <stdint.h>
 #include "tca9555.h"
 
+// 8 bytes secret key used for score validation
+#define SECRET_KEY {0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE}
+
 typedef enum {
     TUTOR_FREE_PLAY_MODE = 0,
     TUTOR_CONVERT_MODE,
@@ -49,6 +52,7 @@ typedef struct {
     uint16_t total;
     uint32_t start_score;
     uint32_t end_score;
+    uint32_t accumulated_score;
 } tutor_stats_t;
 
 typedef struct {
@@ -77,6 +81,22 @@ typedef struct {
     uint16_t btn_value;
     uint16_t counter_speed;
 } tutor_t;
+
+typedef struct {
+    uint8_t salt;
+    uint8_t secret_key[8];
+    uint32_t translate_score;
+    uint32_t translate_hint_score;
+    uint32_t logic_score;
+    uint32_t total_score;
+} hash_data_t;
+
+typedef struct {
+    uint32_t total_time;
+    uint8_t page;
+    uint8_t page_updated;
+    hash_data_t data;
+} tutor_summary_t;
 
 uint16_t get_btn_value(uint16_t value);
 uint16_t get_selected_led(uint16_t value);
